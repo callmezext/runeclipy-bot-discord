@@ -221,16 +221,13 @@ async function main() {
   await mongoose.connect(MONGODB_URI);
   console.log("[Bot] ✅ MongoDB connected");
 
-  // Set initial status
-  await updateStatus({ status: "offline", command: "idle", error: "" });
-  console.log("[Bot] ⏳ Waiting for commands from admin dashboard...");
-  console.log(`[Bot] Polling every ${POLL_INTERVAL / 1000}s\n`);
+  // Auto-start bot immediately on deploy
+  console.log("[Bot] 🚀 Auto-starting bot...");
+  await startBot();
 
-  // Start polling for commands
+  // Start polling for commands (stop/restart from admin dashboard)
+  console.log(`[Bot] Polling for commands every ${POLL_INTERVAL / 1000}s\n`);
   pollTimer = setInterval(pollCommands, POLL_INTERVAL);
-
-  // Also run once immediately
-  await pollCommands();
 }
 
 // ─── Graceful Shutdown ───────────────────────────────────
