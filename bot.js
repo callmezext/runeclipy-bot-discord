@@ -15,7 +15,7 @@ try { require("dotenv").config(); } catch { /* dotenv optional */ }
 // ─── Config ──────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI || "";
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
-const CLIENT_ID = process.env.DISCORD_CLIENT_ID || "1447207634645291119";
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID || "1501176219255963778";
 const POLL_INTERVAL = 5000;
 const HEARTBEAT_INTERVAL = 10000;
 
