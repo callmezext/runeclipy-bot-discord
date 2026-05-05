@@ -1,0 +1,18 @@
+{
+  "name": "runeclipy-discord-bot",
+  "version": "1.0.0",
+  "description": "RuneClipy Discord Bot — standalone service. Deploy on Railway, Render, or any Node.js host.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.18.0",
+    "dotenv": "^16.4.7",
+    "mongoose": "^8.13.2"
+  }
+}
