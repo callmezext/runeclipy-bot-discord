@@ -49,18 +49,30 @@ const commands = [
     .setDescription("⏱️ Berapa lama bot sudah online"),
 ];
 
-// ─── Register Slash Commands to Discord API ──────────────
-async function registerCommands() {
+// ─── Register Slash Commands (per-guild = INSTANT) ───────
+async function registerCommands(guilds) {
   const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
+  const commandData = commands.map((cmd) => cmd.toJSON());
 
+  // Register to EACH guild for instant availability
+  for (const guild of guilds) {
+    try {
+      await rest.put(
+        Routes.applicationGuildCommands(CLIENT_ID, guild.id),
+        { body: commandData }
+      );
+      console.log(`[Bot] ✅ Commands registered to: ${guild.name} (${guild.id})`);
+    } catch (err) {
+      console.error(`[Bot] ❌ Failed to register commands to ${guild.name}:`, err.message);
+    }
+  }
+
+  // Also register globally as fallback (takes ~1 hour for new servers)
   try {
-    console.log("[Bot] 📝 Registering slash commands...");
-    await rest.put(Routes.applicationCommands(CLIENT_ID), {
-      body: commands.map((cmd) => cmd.toJSON()),
-    });
-    console.log(`[Bot] ✅ ${commands.length} slash commands registered globally!`);
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandData });
+    console.log(`[Bot] ✅ Commands registered globally as fallback`);
   } catch (err) {
-    console.error("[Bot] ❌ Failed to register commands:", err.message);
+    console.error("[Bot] ⚠️ Global registration failed:", err.message);
   }
 }
 
@@ -98,12 +110,12 @@ async function handleInteraction(interaction) {
         .setTitle("🔮 RuneClipy Bot — Commands")
         .setDescription("Berikut daftar semua slash commands yang tersedia:")
         .addFields(
-          { name: "</ping:0>", value: "Cek kecepatan dan latency bot" },
-          { name: "</help:0>", value: "Tampilkan daftar commands ini" },
-          { name: "</stats:0>", value: "Lihat statistik bot (servers, users, dll)" },
-          { name: "</info:0>", value: "Informasi tentang platform RuneClipy" },
-          { name: "</website:0>", value: "Link langsung ke website" },
-          { name: "</uptime:0>", value: "Berapa lama bot sudah online" },
+          { name: "/ping", value: "🏓 Cek kecepatan dan latency bot" },
+          { name: "/help", value: "📖 Tampilkan daftar commands ini" },
+          { name: "/stats", value: "📊 Lihat statistik bot (servers, users, dll)" },
+          { name: "/info", value: "🔮 Informasi tentang platform RuneClipy" },
+          { name: "/website", value: "🌐 Link langsung ke website" },
+          { name: "/uptime", value: "⏱️ Berapa lama bot sudah online" },
         )
         .setFooter({ text: "Ketik / untuk melihat semua commands" })
         .setTimestamp();
@@ -249,8 +261,11 @@ async function startBot() {
       console.log(`[Bot] ✅ Online as ${c.user.tag} — ${c.guilds.cache.size} servers`);
       c.user.setActivity("RuneClipy 🔮 | /help", { type: ActivityType.Watching });
 
+      // Update status to ONLINE + clear any old errors
       await updateStatus({
-        status: "online", error: "",
+        status: "online",
+        error: "",
+        command: "idle",
         username: c.user.tag,
         avatar: c.user.displayAvatarURL(),
         guildCount: c.guilds.cache.size,
@@ -259,11 +274,23 @@ async function startBot() {
         lastHeartbeat: new Date(),
       });
 
+      // Register slash commands to ALL guilds (instant!) + global
+      console.log("[Bot] 📝 Registering slash commands to all guilds...");
+      await registerCommands(c.guilds.cache);
+
       startHeartbeat();
+      console.log("[Bot] ✅ Bot fully ready! Commands available NOW.");
     });
 
     // Handle slash commands
     client.on(Events.InteractionCreate, handleInteraction);
+
+    // Auto-register commands when joining a new server
+    client.on(Events.GuildCreate, async (guild) => {
+      console.log(`[Bot] 📥 Joined new server: ${guild.name}`);
+      await registerCommands([guild]);
+      await updateStatus({ guildCount: client.guilds.cache.size });
+    });
 
     client.on(Events.Error, async (err) => {
       console.error("[Bot] Error:", err.message);
@@ -308,8 +335,15 @@ async function pollCommands() {
     if (!doc) return;
     switch (doc.command) {
       case "stop": await stopBot(); break;
-      case "restart": await stopBot(); await new Promise(r => setTimeout(r, 1000)); await startBot(); break;
-      case "start": if (!client) await startBot(); else await updateStatus({ command: "idle" }); break;
+      case "restart":
+        await stopBot();
+        await new Promise(r => setTimeout(r, 1000));
+        await startBot();
+        break;
+      case "start":
+        if (!client) await startBot();
+        else await updateStatus({ command: "idle" });
+        break;
     }
   } catch (err) { console.error("[Bot] Poll error:", err.message); }
 }
@@ -325,10 +359,10 @@ async function main() {
   await mongoose.connect(MONGODB_URI);
   console.log("[Bot] ✅ MongoDB connected");
 
-  // Register slash commands with Discord API
-  await registerCommands();
+  // Clear any stale error from previous runs
+  await updateStatus({ error: "", command: "idle" });
 
-  // Start bot
+  // Auto-start bot
   console.log("[Bot] 🚀 Starting bot...");
   await startBot();
 
