@@ -1,37 +1,213 @@
 /**
  * ═══════════════════════════════════════════════════════════
- *  RuneClipy — Standalone Discord Bot
- *  Runs on Railway / Render. Web app on Vercel.
- *  Both share the same MongoDB database.
- *
- *  Usage:
- *    MONGODB_URI=mongodb+srv://... node bot.js
- *    or create a .env file
+ *  RuneClipy — Standalone Discord Bot (Slash Commands)
+ *  Web: Vercel | Bot: Railway | DB: MongoDB Atlas
  * ═══════════════════════════════════════════════════════════
  */
 
-const { Client, GatewayIntentBits, Events, ActivityType } = require("discord.js");
+const {
+  Client, GatewayIntentBits, Events, ActivityType,
+  REST, Routes, SlashCommandBuilder, EmbedBuilder
+} = require("discord.js");
 const mongoose = require("mongoose");
 try { require("dotenv").config(); } catch { /* dotenv optional */ }
 
 // ─── Config ──────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI || "";
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID || "1447207634645291119";
 const POLL_INTERVAL = 5000;
 const HEARTBEAT_INTERVAL = 10000;
-const PREFIX = "!"; // Command prefix
 
-if (!MONGODB_URI) {
-  console.error("❌ MONGODB_URI is required. Set it as env variable or in .env file.");
-  process.exit(1);
+if (!MONGODB_URI) { console.error("❌ MONGODB_URI required"); process.exit(1); }
+if (!BOT_TOKEN) { console.error("❌ DISCORD_BOT_TOKEN required"); process.exit(1); }
+
+// ─── Slash Commands Definition ───────────────────────────
+const commands = [
+  new SlashCommandBuilder()
+    .setName("ping")
+    .setDescription("🏓 Cek kecepatan dan latency bot"),
+
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("📖 Tampilkan daftar semua commands"),
+
+  new SlashCommandBuilder()
+    .setName("stats")
+    .setDescription("📊 Lihat statistik bot"),
+
+  new SlashCommandBuilder()
+    .setName("info")
+    .setDescription("🔮 Informasi tentang RuneClipy"),
+
+  new SlashCommandBuilder()
+    .setName("website")
+    .setDescription("🌐 Link ke website RuneClipy"),
+
+  new SlashCommandBuilder()
+    .setName("uptime")
+    .setDescription("⏱️ Berapa lama bot sudah online"),
+];
+
+// ─── Register Slash Commands to Discord API ──────────────
+async function registerCommands() {
+  const rest = new REST({ version: "10" }).setToken(BOT_TOKEN);
+
+  try {
+    console.log("[Bot] 📝 Registering slash commands...");
+    await rest.put(Routes.applicationCommands(CLIENT_ID), {
+      body: commands.map((cmd) => cmd.toJSON()),
+    });
+    console.log(`[Bot] ✅ ${commands.length} slash commands registered globally!`);
+  } catch (err) {
+    console.error("[Bot] ❌ Failed to register commands:", err.message);
+  }
 }
 
-if (!BOT_TOKEN) {
-  console.error("❌ DISCORD_BOT_TOKEN is required. Set it as env variable or in .env file.");
-  process.exit(1);
+// ─── Handle Slash Command Interactions ───────────────────
+async function handleInteraction(interaction) {
+  if (!interaction.isChatInputCommand()) return;
+
+  const { commandName } = interaction;
+
+  switch (commandName) {
+    case "ping": {
+      const sent = Date.now();
+      await interaction.reply({ content: "🏓 Pinging...", fetchReply: true });
+      const latency = Date.now() - sent;
+      const apiLatency = Math.round(client.ws.ping);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle("🏓 Pong!")
+        .addFields(
+          { name: "📡 Bot Latency", value: `\`${latency}ms\``, inline: true },
+          { name: "💓 API Latency", value: `\`${apiLatency}ms\``, inline: true },
+          { name: "⏱️ Uptime", value: `\`${formatUptime(client.uptime)}\``, inline: true },
+        )
+        .setFooter({ text: "RuneClipy Bot 🔮" })
+        .setTimestamp();
+
+      await interaction.editReply({ content: "", embeds: [embed] });
+      break;
+    }
+
+    case "help": {
+      const embed = new EmbedBuilder()
+        .setColor(0x00D4AA)
+        .setTitle("🔮 RuneClipy Bot — Commands")
+        .setDescription("Berikut daftar semua slash commands yang tersedia:")
+        .addFields(
+          { name: "</ping:0>", value: "Cek kecepatan dan latency bot" },
+          { name: "</help:0>", value: "Tampilkan daftar commands ini" },
+          { name: "</stats:0>", value: "Lihat statistik bot (servers, users, dll)" },
+          { name: "</info:0>", value: "Informasi tentang platform RuneClipy" },
+          { name: "</website:0>", value: "Link langsung ke website" },
+          { name: "</uptime:0>", value: "Berapa lama bot sudah online" },
+        )
+        .setFooter({ text: "Ketik / untuk melihat semua commands" })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+      break;
+    }
+
+    case "stats": {
+      const uptime = formatUptime(client.uptime);
+      const guilds = client.guilds.cache.size;
+      const users = client.guilds.cache.reduce((acc, g) => acc + g.memberCount, 0);
+      const channels = client.channels.cache.size;
+
+      const embed = new EmbedBuilder()
+        .setColor(0xFF6B6B)
+        .setTitle("📊 Bot Statistics")
+        .addFields(
+          { name: "🖥️ Servers", value: `\`${guilds}\``, inline: true },
+          { name: "👥 Users", value: `\`${users.toLocaleString()}\``, inline: true },
+          { name: "💬 Channels", value: `\`${channels}\``, inline: true },
+          { name: "💓 Ping", value: `\`${Math.round(client.ws.ping)}ms\``, inline: true },
+          { name: "⏱️ Uptime", value: `\`${uptime}\``, inline: true },
+          { name: "📦 Runtime", value: `\`Node ${process.version}\``, inline: true },
+        )
+        .setFooter({ text: "RuneClipy Bot 🔮" })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+      break;
+    }
+
+    case "info": {
+      const embed = new EmbedBuilder()
+        .setColor(0x9B59B6)
+        .setTitle("🔮 RuneClipy")
+        .setDescription(
+          "Platform yang menghubungkan **brand** dengan **content creator TikTok**.\n\n" +
+          "Creator bisa submit video menggunakan sound dari campaign, dan mendapatkan **reward** berdasarkan jumlah views!\n\n" +
+          "💰 **Earn money** dari video TikTok kamu\n" +
+          "🎵 **Pilih campaign** yang sesuai niche kamu\n" +
+          "🏆 **Leaderboard** dengan bonus untuk top creator\n" +
+          "📊 **Dashboard** untuk track earnings real-time"
+        )
+        .addFields(
+          { name: "🌐 Website", value: "[runeclipy.vercel.app](https://runeclipy.vercel.app)", inline: true },
+          { name: "📱 Daftar", value: "[Register](https://runeclipy.vercel.app/register)", inline: true },
+        )
+        .setFooter({ text: "Join sekarang dan mulai earning! 🚀" })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+      break;
+    }
+
+    case "website": {
+      const embed = new EmbedBuilder()
+        .setColor(0x3498DB)
+        .setTitle("🌐 RuneClipy Website")
+        .setDescription(
+          "**Klik link di bawah untuk mengunjungi RuneClipy:**\n\n" +
+          "🏠 Homepage: https://runeclipy.vercel.app\n" +
+          "📝 Register: https://runeclipy.vercel.app/register\n" +
+          "🔑 Login: https://runeclipy.vercel.app/login"
+        )
+        .setFooter({ text: "RuneClipy 🔮" });
+
+      await interaction.reply({ embeds: [embed] });
+      break;
+    }
+
+    case "uptime": {
+      const uptime = formatUptime(client.uptime);
+      const startedAt = new Date(Date.now() - client.uptime);
+
+      const embed = new EmbedBuilder()
+        .setColor(0x2ECC71)
+        .setTitle("⏱️ Bot Uptime")
+        .addFields(
+          { name: "⏳ Online Selama", value: `\`${uptime}\``, inline: true },
+          { name: "🚀 Started At", value: `<t:${Math.floor(startedAt.getTime() / 1000)}:F>`, inline: true },
+        )
+        .setFooter({ text: "RuneClipy Bot 🔮" })
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed] });
+      break;
+    }
+  }
 }
 
-// ─── Mongoose Schemas ────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h ${m % 60}m`;
+  if (h > 0) return `${h}h ${m % 60}m ${s % 60}s`;
+  if (m > 0) return `${m}m ${s % 60}s`;
+  return `${s}s`;
+}
+
+// ─── Mongoose Schema ─────────────────────────────────────
 const BotStatusSchema = new mongoose.Schema(
   {
     botType: { type: String, default: "discord", unique: true },
@@ -47,121 +223,34 @@ const BotStatusSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
 const BotStatus = mongoose.models.BotStatus || mongoose.model("BotStatus", BotStatusSchema, "botstatuses");
 
-// ─── State ───────────────────────────────────────────────
-let client = null;
-let heartbeatTimer = null;
-let pollTimer = null;
-
-// ─── Helpers ─────────────────────────────────────────────
 async function updateStatus(fields) {
   await BotStatus.updateOne({ botType: "discord" }, { $set: fields }, { upsert: true });
 }
 
-// ─── Bot Commands ────────────────────────────────────────
-function handleCommand(message) {
-  if (message.author.bot) return;
-  if (!message.content.startsWith(PREFIX)) return;
-
-  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
-  const command = args.shift().toLowerCase();
-
-  switch (command) {
-    case "ping": {
-      const sent = Date.now();
-      message.reply("🏓 Pinging...").then((reply) => {
-        const latency = Date.now() - sent;
-        const apiLatency = Math.round(client.ws.ping);
-        reply.edit(
-          `🏓 **Pong!**\n` +
-          `📡 Bot Latency: \`${latency}ms\`\n` +
-          `💓 API Latency: \`${apiLatency}ms\`\n` +
-          `⏱️ Uptime: \`${formatUptime(client.uptime)}\``
-        );
-      });
-      break;
-    }
-
-    case "help": {
-      message.reply(
-        `**🔮 RuneClipy Bot Commands**\n\n` +
-        `\`!ping\` — Check bot latency\n` +
-        `\`!help\` — Show this menu\n` +
-        `\`!stats\` — Show bot stats\n` +
-        `\`!info\` — About RuneClipy`
-      );
-      break;
-    }
-
-    case "stats": {
-      const uptime = formatUptime(client.uptime);
-      const guilds = client.guilds.cache.size;
-      const users = client.guilds.cache.reduce((acc, g) => acc + g.memberCount, 0);
-      message.reply(
-        `**📊 Bot Stats**\n\n` +
-        `🖥️ Servers: \`${guilds}\`\n` +
-        `👥 Users: \`${users.toLocaleString()}\`\n` +
-        `💓 Ping: \`${Math.round(client.ws.ping)}ms\`\n` +
-        `⏱️ Uptime: \`${uptime}\`\n` +
-        `📦 Node.js: \`${process.version}\`\n` +
-        `🤖 Discord.js: \`v14\``
-      );
-      break;
-    }
-
-    case "info": {
-      message.reply(
-        `**🔮 RuneClipy**\n\n` +
-        `Platform untuk creator TikTok yang menghubungkan brand dengan content creator.\n\n` +
-        `🌐 Website: https://runeclipy.vercel.app\n` +
-        `📱 Daftar sekarang dan mulai earn dari video TikTok kamu!`
-      );
-      break;
-    }
-  }
-}
-
-function formatUptime(ms) {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
-  if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
-  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
-  return `${seconds}s`;
-}
-
 // ─── Bot Lifecycle ───────────────────────────────────────
+let client = null;
+let heartbeatTimer = null;
+let pollTimer = null;
+
 async function startBot() {
-  if (client) {
-    console.log("[Bot] Already running, destroying old instance...");
-    try { client.destroy(); } catch { /* ignore */ }
-    client = null;
-  }
+  if (client) { try { client.destroy(); } catch {} client = null; }
 
   console.log("[Bot] 🔄 Connecting to Discord...");
   await updateStatus({ status: "connecting", error: "", command: "idle" });
 
   try {
     client = new Client({
-      intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-      ],
+      intents: [GatewayIntentBits.Guilds],
     });
 
     client.once(Events.ClientReady, async (c) => {
       console.log(`[Bot] ✅ Online as ${c.user.tag} — ${c.guilds.cache.size} servers`);
-      c.user.setActivity("RuneClipy 🔮 | !help", { type: ActivityType.Watching });
+      c.user.setActivity("RuneClipy 🔮 | /help", { type: ActivityType.Watching });
 
       await updateStatus({
-        status: "online",
-        error: "",
+        status: "online", error: "",
         username: c.user.tag,
         avatar: c.user.displayAvatarURL(),
         guildCount: c.guilds.cache.size,
@@ -173,46 +262,34 @@ async function startBot() {
       startHeartbeat();
     });
 
-    // Handle messages / commands
-    client.on(Events.MessageCreate, handleCommand);
+    // Handle slash commands
+    client.on(Events.InteractionCreate, handleInteraction);
 
     client.on(Events.Error, async (err) => {
       console.error("[Bot] Error:", err.message);
       await updateStatus({ error: err.message });
     });
 
-    client.on(Events.ShardDisconnect, async () => {
-      console.warn("[Bot] ⚠️ Disconnected");
-      await updateStatus({ status: "offline", startedAt: null });
-      stopHeartbeat();
-    });
-
     await client.login(BOT_TOKEN);
   } catch (err) {
-    const msg = err.message || "Login failed";
-    console.error("[Bot] ❌ Start failed:", msg);
-    await updateStatus({ status: "error", error: msg, command: "idle" });
+    console.error("[Bot] ❌ Start failed:", err.message);
+    await updateStatus({ status: "error", error: err.message, command: "idle" });
     client = null;
   }
 }
 
 async function stopBot() {
   console.log("[Bot] 🔴 Stopping...");
-  stopHeartbeat();
-  if (client) {
-    try { client.destroy(); } catch { /* ignore */ }
-    client = null;
-  }
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  if (client) { try { client.destroy(); } catch {} client = null; }
   await updateStatus({
     status: "offline", error: "", command: "idle",
     startedAt: null, username: "", avatar: "", guildCount: 0, ping: 0,
   });
-  console.log("[Bot] Stopped.");
 }
 
-// ─── Heartbeat ───────────────────────────────────────────
 function startHeartbeat() {
-  stopHeartbeat();
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = setInterval(async () => {
     if (client && client.ws.status === 0) {
       await updateStatus({
@@ -224,39 +301,23 @@ function startHeartbeat() {
   }, HEARTBEAT_INTERVAL);
 }
 
-function stopHeartbeat() {
-  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-}
-
-// ─── Command Poller (for admin dashboard control) ────────
+// ─── Command Poller (admin dashboard) ────────────────────
 async function pollCommands() {
   try {
-    let doc = await BotStatus.findOne({ botType: "discord" });
+    const doc = await BotStatus.findOne({ botType: "discord" });
     if (!doc) return;
-
     switch (doc.command) {
-      case "stop":
-        await stopBot();
-        break;
-      case "restart":
-        await stopBot();
-        await new Promise((r) => setTimeout(r, 1000));
-        await startBot();
-        break;
-      case "start":
-        if (!client) await startBot();
-        else await updateStatus({ command: "idle" });
-        break;
+      case "stop": await stopBot(); break;
+      case "restart": await stopBot(); await new Promise(r => setTimeout(r, 1000)); await startBot(); break;
+      case "start": if (!client) await startBot(); else await updateStatus({ command: "idle" }); break;
     }
-  } catch (err) {
-    console.error("[Bot] Poll error:", err.message);
-  }
+  } catch (err) { console.error("[Bot] Poll error:", err.message); }
 }
 
 // ─── Main ────────────────────────────────────────────────
 async function main() {
   console.log("═══════════════════════════════════════════");
-  console.log("  RuneClipy Discord Bot — Standalone");
+  console.log("  RuneClipy Discord Bot — Slash Commands");
   console.log("  Web: Vercel | Bot: Railway");
   console.log("═══════════════════════════════════════════");
 
@@ -264,31 +325,28 @@ async function main() {
   await mongoose.connect(MONGODB_URI);
   console.log("[Bot] ✅ MongoDB connected");
 
-  // Auto-start bot
-  console.log("[Bot] 🚀 Auto-starting bot...");
+  // Register slash commands with Discord API
+  await registerCommands();
+
+  // Start bot
+  console.log("[Bot] 🚀 Starting bot...");
   await startBot();
 
-  // Poll for admin dashboard commands
-  console.log(`[Bot] Polling for commands every ${POLL_INTERVAL / 1000}s\n`);
+  // Poll for admin commands
   pollTimer = setInterval(pollCommands, POLL_INTERVAL);
 }
 
 // ─── Graceful Shutdown ───────────────────────────────────
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
 async function shutdown() {
   console.log("\n[Bot] Shutting down...");
   if (pollTimer) clearInterval(pollTimer);
-  stopHeartbeat();
-  if (client) { try { client.destroy(); } catch { /* ignore */ } }
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (client) { try { client.destroy(); } catch {} }
   await updateStatus({ status: "offline", command: "idle", startedAt: null });
   await mongoose.disconnect();
-  console.log("[Bot] 👋 Goodbye!");
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-
-main().catch((err) => {
-  console.error("[Bot] Fatal:", err);
-  process.exit(1);
-});
+main().catch((err) => { console.error("[Bot] Fatal:", err); process.exit(1); });
