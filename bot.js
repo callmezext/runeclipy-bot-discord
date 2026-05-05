@@ -109,12 +109,12 @@ async function registerCommands() {
     }
   }
 
-  // Global fallback (takes ~1 hour for new servers)
+  // Clear global commands (prevent duplicates — guild-only is enough)
   try {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commandData });
-    console.log(`[Bot] ✅ Commands registered globally (fallback)`);
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
+    console.log(`[Bot] 🧹 Global commands cleared (guild-only mode)`);
   } catch (err) {
-    console.error("[Bot] ⚠️ Global registration failed:", err.message);
+    console.error("[Bot] ⚠️ Could not clear global commands:", err.message);
   }
 }
 
