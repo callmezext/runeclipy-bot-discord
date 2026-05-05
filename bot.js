@@ -1,13 +1,12 @@
 /**
  * ═══════════════════════════════════════════════════════════
  *  RuneClipy — Standalone Discord Bot
- *  Reads credentials & commands from MongoDB.
- *  Controlled from admin dashboard via BotStatus collection.
+ *  Runs on Railway / Render. Web app on Vercel.
+ *  Both share the same MongoDB database.
  *
  *  Usage:
  *    MONGODB_URI=mongodb+srv://... node bot.js
- *
- *  Or create a .env file in this directory.
+ *    or create a .env file
  * ═══════════════════════════════════════════════════════════
  */
 
@@ -17,15 +16,22 @@ try { require("dotenv").config(); } catch { /* dotenv optional */ }
 
 // ─── Config ──────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI || "";
-const POLL_INTERVAL = 5000; // Check for commands every 5s
-const HEARTBEAT_INTERVAL = 10000; // Send heartbeat every 10s
+const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || "";
+const POLL_INTERVAL = 5000;
+const HEARTBEAT_INTERVAL = 10000;
+const PREFIX = "!"; // Command prefix
 
 if (!MONGODB_URI) {
   console.error("❌ MONGODB_URI is required. Set it as env variable or in .env file.");
   process.exit(1);
 }
 
-// ─── Mongoose Schemas (mirrors the Next.js models) ───────
+if (!BOT_TOKEN) {
+  console.error("❌ DISCORD_BOT_TOKEN is required. Set it as env variable or in .env file.");
+  process.exit(1);
+}
+
+// ─── Mongoose Schemas ────────────────────────────────────
 const BotStatusSchema = new mongoose.Schema(
   {
     botType: { type: String, default: "discord", unique: true },
@@ -42,18 +48,7 @@ const BotStatusSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const SiteSettingSchema = new mongoose.Schema(
-  {
-    discordBotToken: { type: String, default: "" },
-    discordGuildId: { type: String, default: "" },
-    discordWebhookUrl: { type: String, default: "" },
-    discordInviteUrl: { type: String, default: "" },
-  },
-  { timestamps: true, strict: false }
-);
-
 const BotStatus = mongoose.models.BotStatus || mongoose.model("BotStatus", BotStatusSchema, "botstatuses");
-const SiteSetting = mongoose.models.SiteSetting || mongoose.model("SiteSetting", SiteSettingSchema, "sitesettings");
 
 // ─── State ───────────────────────────────────────────────
 let client = null;
@@ -61,19 +56,83 @@ let heartbeatTimer = null;
 let pollTimer = null;
 
 // ─── Helpers ─────────────────────────────────────────────
-async function getOrCreateStatus() {
-  let doc = await BotStatus.findOne({ botType: "discord" });
-  if (!doc) doc = await BotStatus.create({ botType: "discord" });
-  return doc;
-}
-
 async function updateStatus(fields) {
   await BotStatus.updateOne({ botType: "discord" }, { $set: fields }, { upsert: true });
 }
 
-async function getToken() {
-  const settings = await SiteSetting.findOne().lean();
-  return settings?.discordBotToken || process.env.DISCORD_BOT_TOKEN || "";
+// ─── Bot Commands ────────────────────────────────────────
+function handleCommand(message) {
+  if (message.author.bot) return;
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const command = args.shift().toLowerCase();
+
+  switch (command) {
+    case "ping": {
+      const sent = Date.now();
+      message.reply("🏓 Pinging...").then((reply) => {
+        const latency = Date.now() - sent;
+        const apiLatency = Math.round(client.ws.ping);
+        reply.edit(
+          `🏓 **Pong!**\n` +
+          `📡 Bot Latency: \`${latency}ms\`\n` +
+          `💓 API Latency: \`${apiLatency}ms\`\n` +
+          `⏱️ Uptime: \`${formatUptime(client.uptime)}\``
+        );
+      });
+      break;
+    }
+
+    case "help": {
+      message.reply(
+        `**🔮 RuneClipy Bot Commands**\n\n` +
+        `\`!ping\` — Check bot latency\n` +
+        `\`!help\` — Show this menu\n` +
+        `\`!stats\` — Show bot stats\n` +
+        `\`!info\` — About RuneClipy`
+      );
+      break;
+    }
+
+    case "stats": {
+      const uptime = formatUptime(client.uptime);
+      const guilds = client.guilds.cache.size;
+      const users = client.guilds.cache.reduce((acc, g) => acc + g.memberCount, 0);
+      message.reply(
+        `**📊 Bot Stats**\n\n` +
+        `🖥️ Servers: \`${guilds}\`\n` +
+        `👥 Users: \`${users.toLocaleString()}\`\n` +
+        `💓 Ping: \`${Math.round(client.ws.ping)}ms\`\n` +
+        `⏱️ Uptime: \`${uptime}\`\n` +
+        `📦 Node.js: \`${process.version}\`\n` +
+        `🤖 Discord.js: \`v14\``
+      );
+      break;
+    }
+
+    case "info": {
+      message.reply(
+        `**🔮 RuneClipy**\n\n` +
+        `Platform untuk creator TikTok yang menghubungkan brand dengan content creator.\n\n` +
+        `🌐 Website: https://runeclipy.vercel.app\n` +
+        `📱 Daftar sekarang dan mulai earn dari video TikTok kamu!`
+      );
+      break;
+    }
+  }
+}
+
+function formatUptime(ms) {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) return `${days}d ${hours % 24}h ${minutes % 60}m`;
+  if (hours > 0) return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
 }
 
 // ─── Bot Lifecycle ───────────────────────────────────────
@@ -84,14 +143,7 @@ async function startBot() {
     client = null;
   }
 
-  const token = await getToken();
-  if (!token) {
-    console.error("[Bot] ❌ No bot token found in database or env!");
-    await updateStatus({ status: "error", error: "No bot token configured. Set it in admin dashboard.", command: "idle" });
-    return;
-  }
-
-  console.log("[Bot] 🔄 Connecting...");
+  console.log("[Bot] 🔄 Connecting to Discord...");
   await updateStatus({ status: "connecting", error: "", command: "idle" });
 
   try {
@@ -99,12 +151,13 @@ async function startBot() {
       intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
       ],
     });
 
     client.once(Events.ClientReady, async (c) => {
       console.log(`[Bot] ✅ Online as ${c.user.tag} — ${c.guilds.cache.size} servers`);
-      c.user.setActivity("RuneClipy 🔮", { type: ActivityType.Watching });
+      c.user.setActivity("RuneClipy 🔮 | !help", { type: ActivityType.Watching });
 
       await updateStatus({
         status: "online",
@@ -117,9 +170,11 @@ async function startBot() {
         lastHeartbeat: new Date(),
       });
 
-      // Start heartbeat
       startHeartbeat();
     });
+
+    // Handle messages / commands
+    client.on(Events.MessageCreate, handleCommand);
 
     client.on(Events.Error, async (err) => {
       console.error("[Bot] Error:", err.message);
@@ -132,7 +187,7 @@ async function startBot() {
       stopHeartbeat();
     });
 
-    await client.login(token);
+    await client.login(BOT_TOKEN);
   } catch (err) {
     const msg = err.message || "Login failed";
     console.error("[Bot] ❌ Start failed:", msg);
@@ -144,21 +199,13 @@ async function startBot() {
 async function stopBot() {
   console.log("[Bot] 🔴 Stopping...");
   stopHeartbeat();
-
   if (client) {
     try { client.destroy(); } catch { /* ignore */ }
     client = null;
   }
-
   await updateStatus({
-    status: "offline",
-    error: "",
-    command: "idle",
-    startedAt: null,
-    username: "",
-    avatar: "",
-    guildCount: 0,
-    ping: 0,
+    status: "offline", error: "", command: "idle",
+    startedAt: null, username: "", avatar: "", guildCount: 0, ping: 0,
   });
   console.log("[Bot] Stopped.");
 }
@@ -178,21 +225,16 @@ function startHeartbeat() {
 }
 
 function stopHeartbeat() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
 }
 
-// ─── Command Poller ──────────────────────────────────────
+// ─── Command Poller (for admin dashboard control) ────────
 async function pollCommands() {
   try {
-    const doc = await getOrCreateStatus();
+    let doc = await BotStatus.findOne({ botType: "discord" });
+    if (!doc) return;
 
     switch (doc.command) {
-      case "start":
-        await startBot();
-        break;
       case "stop":
         await stopBot();
         break;
@@ -201,8 +243,9 @@ async function pollCommands() {
         await new Promise((r) => setTimeout(r, 1000));
         await startBot();
         break;
-      case "idle":
-        // No command, do nothing
+      case "start":
+        if (!client) await startBot();
+        else await updateStatus({ command: "idle" });
         break;
     }
   } catch (err) {
@@ -214,18 +257,18 @@ async function pollCommands() {
 async function main() {
   console.log("═══════════════════════════════════════════");
   console.log("  RuneClipy Discord Bot — Standalone");
+  console.log("  Web: Vercel | Bot: Railway");
   console.log("═══════════════════════════════════════════");
 
-  // Connect to MongoDB
   console.log("[Bot] Connecting to MongoDB...");
   await mongoose.connect(MONGODB_URI);
   console.log("[Bot] ✅ MongoDB connected");
 
-  // Auto-start bot immediately on deploy
+  // Auto-start bot
   console.log("[Bot] 🚀 Auto-starting bot...");
   await startBot();
 
-  // Start polling for commands (stop/restart from admin dashboard)
+  // Poll for admin dashboard commands
   console.log(`[Bot] Polling for commands every ${POLL_INTERVAL / 1000}s\n`);
   pollTimer = setInterval(pollCommands, POLL_INTERVAL);
 }
@@ -245,7 +288,6 @@ async function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-// Run
 main().catch((err) => {
   console.error("[Bot] Fatal:", err);
   process.exit(1);
