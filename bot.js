@@ -91,6 +91,18 @@ const LinkTokenSchema = new mongoose.Schema({
   expiresAt: Date,
 }, { timestamps: true });
 
+const ActivityLogSchema = new mongoose.Schema({
+  actor: String,
+  actorId: String,
+  action: String,
+  target: String,
+  targetType: String,
+  details: String,
+  metadata: mongoose.Schema.Types.Mixed,
+  ip: String,
+  notifiedMatrix: { type: Boolean, default: false },
+}, { timestamps: true, strict: false });
+
 const BotStatus = mongoose.models.BotStatus || mongoose.model("BotStatus", BotStatusSchema, "botstatuses");
 const SiteSetting = mongoose.models.SiteSetting || mongoose.model("SiteSetting", SiteSettingSchema, "sitesettings");
 const Campaign = mongoose.models.Campaign || mongoose.model("Campaign", CampaignSchema, "campaigns");
@@ -100,6 +112,7 @@ const ConnectedAccount = mongoose.models.ConnectedAccount || mongoose.model("Con
 const Transaction = mongoose.models.Transaction || mongoose.model("Transaction", TransactionSchema, "transactions");
 const Referral = mongoose.models.Referral || mongoose.model("Referral", ReferralSchema, "referrals");
 const LinkToken = mongoose.models.LinkToken || mongoose.model("LinkToken", LinkTokenSchema, "linktokens");
+const ActivityLog = mongoose.models.ActivityLog || mongoose.model("ActivityLog", ActivityLogSchema, "activitylogs");
 
 async function getGuildId() {
   const s = await SiteSetting.findOne().lean();
@@ -748,11 +761,13 @@ async function autoSyncRoles() {
 async function updateStatus(f) { await BotStatus.updateOne({ botType: "discord" }, { $set: f }, { upsert: true }); }
 
 // ─── Bot Lifecycle ───────────────────────────────────────
-let client = null, heartbeatTimer = null, pollTimer = null, autoTimer = null;
+let client = null, heartbeatTimer = null, pollTimer = null, autoTimer = null, matrixTimer = null;
+let botStartedAt = null;
 
 async function startBot() {
   if (client) { try { client.destroy(); } catch {} client = null; }
   await updateStatus({ status: "connecting", error: "", command: "idle" });
+  botStartedAt = new Date();
 
   try {
     client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
@@ -801,6 +816,7 @@ async function startBot() {
 async function stopBot() {
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
   if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (matrixTimer) { clearInterval(matrixTimer); matrixTimer = null; }
   if (client) { try { client.destroy(); } catch {} client = null; }
   await updateStatus({ status:"offline", error:"", command:"idle", startedAt:null, username:"", avatar:"", guildCount:0, ping:0 });
 }
@@ -819,12 +835,106 @@ function startAutoSystems() {
     await autoNotifySubmissions();
     await autoSyncRoles();
   }, AUTO_CHECK_INTERVAL);
+
+  if (matrixTimer) clearInterval(matrixTimer);
+  matrixTimer = setInterval(async () => {
+    await autoStreamMatrixEvents();
+  }, 10000); // Poll matrix events every 10 seconds
+
   // Run once immediately
   setTimeout(async () => {
     await autoNotifyCampaigns();
     await autoNotifySubmissions();
     await autoSyncRoles();
+    await autoStreamMatrixEvents();
   }, 5000);
+}
+
+async function autoStreamMatrixEvents() {
+  try {
+    if (!client) return;
+    const guildId = await getGuildId();
+    if (!guildId) return;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+
+    // 1. Locate or create Matrix Live Activity Stream Channel
+    const settings = await SiteSetting.findOne().lean();
+    let channel = null;
+
+    if (settings?.discordMatrixChannelId) {
+      channel = await client.channels.fetch(settings.discordMatrixChannelId).catch(() => null);
+    }
+
+    if (!channel) {
+      // Find by name "rune-matrix"
+      channel = guild.channels.cache.find(c => c.name === "rune-matrix" && c.type === 0);
+    }
+
+    if (!channel) {
+      try {
+        channel = await guild.channels.create({
+          name: "rune-matrix",
+          type: 0, // GuildText
+          topic: "🔮 Cybernetic Live Activity Stream — Project Rune",
+          reason: "Automatically created Rune Matrix stream channel"
+        });
+        console.log("[Matrix] ✅ Automatically created channel #rune-matrix");
+      } catch (err) {
+        console.error("[Matrix] ⚠️ Can't create #rune-matrix channel:", err.message);
+        // Fallback to discordNotifChannelId
+        const fbChannelId = settings?.discordNotifChannelId;
+        if (fbChannelId) {
+          channel = await client.channels.fetch(fbChannelId).catch(() => null);
+        }
+      }
+    }
+    if (!channel) return;
+
+    // Filter documents created after bot startup to prevent startup flood
+    const startupFilter = { createdAt: { $gt: botStartedAt } };
+
+    // 2. Poll & Stream New Users
+    const newUsers = await User.find({ notifiedMatrix: { $ne: true }, ...startupFilter }).limit(5);
+    for (const u of newUsers) {
+      const emailMasked = u.email ? u.email.replace(/(.{2})(.*)(@.*)/, "$1***$3") : "N/A";
+      const embed = new EmbedBuilder()
+        .setColor(0x00FF66)
+        .setTitle("🟢 [ NODE CONNECTED ]")
+        .setDescription(`\`\`\`ini\n┌── ACCESS GRANTED ────────────────────────\n│ 👤 Username : @${u.username || "unknown"}\n│ 📧 Email    : ${emailMasked}\n│ 🔗 Discord  : ${u.discordUsername ? `@${u.discordUsername}` : "Not Linked"}\n│ 🛡️ Status   : ${u.isBanned ? "BANNED" : "ACTIVE"}\n└──────────────────────────────────────────\n\`\`\``)
+        .setTimestamp();
+      await channel.send({ embeds: [embed] });
+      await User.updateOne({ _id: u._id }, { $set: { notifiedMatrix: true } });
+    }
+
+    // 3. Poll & Stream New Transactions
+    const newTx = await Transaction.find({ notifiedMatrix: { $ne: true }, ...startupFilter }).limit(5);
+    for (const t of newTx) {
+      const u = await User.findById(t.userId).lean();
+      const isEarning = t.type === "campaign_earning" || t.type === "referral_earning";
+      const embed = new EmbedBuilder()
+        .setColor(isEarning ? 0xFFD700 : 0x00CCFF)
+        .setTitle(isEarning ? "🪙 [ TRANSACTION COMPLETED ]" : "💎 [ TRANSACTION SYNCED ]")
+        .setDescription(`\`\`\`ini\n┌── QUANTUM FINANCIAL WAVE ────────────────\n│ 👤 Account  : @${u?.username || "unknown"}\n│ 💰 Amount   : ${fmtCurrency(t.amount)}\n│ 📝 Type     : ${t.type.toUpperCase()}\n│ ⚡ Status   : ${t.status?.toUpperCase() || "SUCCESS"}\n│ 🌐 Info     : ${t.description || "N/A"}\n└──────────────────────────────────────────\n\`\`\``)
+        .setTimestamp();
+      await channel.send({ embeds: [embed] });
+      await Transaction.updateOne({ _id: t._id }, { $set: { notifiedMatrix: true } });
+    }
+
+    // 4. Poll & Stream New Activity Logs (Admin/Mod actions)
+    const newLogs = await ActivityLog.find({ notifiedMatrix: { $ne: true }, ...startupFilter }).limit(5);
+    for (const l of newLogs) {
+      const embed = new EmbedBuilder()
+        .setColor(0x9900FF)
+        .setTitle("🛡️ [ ADMIN PROTOCOL ACTIVATED ]")
+        .setDescription(`\`\`\`ini\n┌── SECURITY PROTOCOL V1 ──────────────────\n│ 👤 Operator : @${l.actor || "admin"}\n│ ⚡ Action   : ${l.action.toUpperCase()}\n│ 📝 Details  : ${l.details || "N/A"}\n│ 🔐 Scope    : ${l.targetType?.toUpperCase() || "SYSTEM"}\n└──────────────────────────────────────────\n\`\`\``)
+        .setTimestamp();
+      await channel.send({ embeds: [embed] });
+      await ActivityLog.updateOne({ _id: l._id }, { $set: { notifiedMatrix: true } });
+    }
+  } catch (err) {
+    console.error("[Matrix] Stream error:", err.message);
+  }
 }
 
 async function pollCommands() {
@@ -853,6 +963,7 @@ async function shutdown() {
   if (pollTimer) clearInterval(pollTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (autoTimer) clearInterval(autoTimer);
+  if (matrixTimer) clearInterval(matrixTimer);
   if (client) { try { client.destroy(); } catch {} }
   await updateStatus({ status:"offline", command:"idle", startedAt:null });
   await mongoose.disconnect();
