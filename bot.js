@@ -757,6 +757,177 @@ async function autoSyncRoles() {
   } catch (err) { console.error("[Auto] Role sync:", err.message); }
 }
 
+// ─── AI Responder System ─────────────────────────────────
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
+async function runBotAIChat(settings, history, newMessage, systemInstruction) {
+  const keys = settings.geminiApiKeys && settings.geminiApiKeys.length > 0 
+    ? settings.geminiApiKeys 
+    : (settings.geminiApiKey ? [settings.geminiApiKey] : []);
+  const activeKeys = keys.filter(k => k && k.trim().length > 0);
+  
+  if (activeKeys.length === 0) {
+    throw new Error("API key Gemini tidak dikonfigurasi.");
+  }
+  
+  let lastError = null;
+  for (let i = 0; i < activeKeys.length; i++) {
+    const currentKey = activeKeys[i];
+    const modelsToTry = [settings.geminiModel || "gemini-2.0-flash"];
+    if (settings.geminiModel && settings.geminiModel !== "gemini-2.0-flash") {
+      modelsToTry.push("gemini-2.0-flash");
+    }
+    if (settings.geminiModel !== "gemini-1.5-flash") {
+      modelsToTry.push("gemini-1.5-flash");
+    }
+    
+    for (const currentModel of modelsToTry) {
+      try {
+        const genAI = new GoogleGenerativeAI(currentKey);
+        const model = genAI.getGenerativeModel({
+          model: currentModel,
+          systemInstruction: systemInstruction,
+        });
+        const chat = model.startChat({ history });
+        const result = await chat.sendMessage(newMessage);
+        return result.response.text();
+      } catch (error) {
+        console.error(`[Bot AI] Gagal dengan model ${currentModel} menggunakan key index ke-${i}:`, error.message);
+        lastError = error;
+        
+        const errorMsg = error.message || "";
+        const errorMsgLower = errorMsg.toLowerCase();
+        
+        const isModelIssue = 
+          errorMsg.includes("503") || 
+          errorMsg.includes("500") || 
+          errorMsg.includes("404") ||
+          errorMsgLower.includes("service unavailable") ||
+          errorMsgLower.includes("model not found") ||
+          errorMsgLower.includes("not found");
+        if (isModelIssue) continue;
+        
+        const isQuotaOrKeyError =
+          errorMsg.includes("429") ||
+          errorMsgLower.includes("quota") ||
+          errorMsgLower.includes("resourceexhausted") ||
+          errorMsgLower.includes("limit") ||
+          errorMsgLower.includes("api key") ||
+          errorMsgLower.includes("key not valid") ||
+          errorMsgLower.includes("unauthorized") ||
+          errorMsg.includes("403");
+        if (isQuotaOrKeyError) break;
+        continue;
+      }
+    }
+  }
+  throw lastError || new Error("Semua model/kunci API gagal.");
+}
+
+async function handleMessageCreate(message) {
+  if (message.author.bot) return;
+
+  try {
+    const settings = await SiteSetting.findOne().lean();
+    if (!settings || !settings.enableDiscordAIChat || !settings.discordChatChannelId) return;
+    if (message.channel.id !== settings.discordChatChannelId) return;
+
+    // Show typing
+    await message.channel.sendTyping();
+
+    // Check if user is admin
+    const userProfile = await User.findOne({ discordId: message.author.id }).lean();
+    const isAdmin = (userProfile && userProfile.role === "admin") || 
+                    message.member?.permissions.has(PermissionFlagsBits.Administrator) || 
+                    message.guild?.ownerId === message.author.id;
+
+    // Get message history (max 15 messages)
+    const rawMsgs = await message.channel.messages.fetch({ limit: 15 });
+    const sortedMsgs = Array.from(rawMsgs.values()).reverse();
+    
+    const history = [];
+    for (const m of sortedMsgs) {
+      if (m.id === message.id) continue;
+      if (m.author.bot && m.author.id !== client.user.id) continue;
+      
+      const role = m.author.id === client.user.id ? "model" : "user";
+      const text = m.content || "";
+      if (!text.trim()) continue;
+      
+      history.push({ role, parts: [{ text }] });
+    }
+    
+    // Clean history for Gemini
+    const cleanHistory = [];
+    let lastRole = null;
+    for (const h of history) {
+      if (h.role === lastRole) {
+        cleanHistory[cleanHistory.length - 1].parts[0].text += "\n" + h.parts[0].text;
+      } else {
+        cleanHistory.push(h);
+        lastRole = h.role;
+      }
+    }
+    if (cleanHistory.length > 0 && cleanHistory[0].role === "model") {
+      cleanHistory.shift();
+    }
+
+    let systemInstruction = "";
+    if (isAdmin) {
+      systemInstruction = `Kamu adalah AI Assistant tingkat tinggi untuk platform RuneClipy. 
+Kamu sedang berbicara dengan OWNER / ADMIN platform di Discord.
+Kamu memiliki wewenang untuk membantu mereka mengelola platform, menganalisis data, dll.
+Bicaralah dengan gaya bahasa yang to-the-point, sangat cerdas, profesional, dan hilangkan basa-basi.
+Gunakan format markdown yang rapi.`;
+    } else {
+      const activeCampaigns = await Campaign.find({ status: "active" }).lean();
+      let context = `Konteks data dari database:\n`;
+      if (userProfile) {
+        context += `- Akun Pengguna Terhubung:\n`;
+        context += `  * Username: @${userProfile.username}\n`;
+        context += `  * Nickname: ${userProfile.nickname || "N/A"}\n`;
+        context += `  * Tier: ${userProfile.tier || "bronze"}\n`;
+        context += `  * Saldo Campaign: $${(userProfile.campaignBalance || 0).toFixed(2)}\n`;
+        context += `  * Saldo Referral: $${(userProfile.referralBalance || 0).toFixed(2)}\n`;
+        context += `  * Total Video: ${userProfile.stats?.totalVideos || 0}\n`;
+        context += `  * Total Views: ${userProfile.stats?.totalViews || 0}\n`;
+      } else {
+        context += `- Akun Pengguna: Akun Discord Anda belum terhubung ke platform RuneClipy. Anda dapat mengetik command /link untuk menghubungkannya terlebih dahulu.\n`;
+      }
+      
+      context += `- Daftar Campaign Aktif saat ini:\n`;
+      if (activeCampaigns.length > 0) {
+        activeCampaigns.forEach(c => {
+          context += `  * ${c.title} (Rate per view: $${c.ratePerView || 0}, Budget tersisa: $${(c.budget - (c.spent || 0)).toFixed(2)})\n`;
+        });
+      } else {
+        context += `  * Tidak ada campaign aktif saat ini.\n`;
+      }
+
+      systemInstruction = `Anda adalah AI Assistant untuk platform RuneClipy di Discord.
+Tugas Anda adalah melayani dan menjawab pertanyaan dari USER BIASA terkait data akun mereka dan campaign yang aktif berdasarkan konteks data berikut.
+JANGAN melayani perintah administratif seperti mengedit data, mengubah status, menghapus data, atau memberikan informasi rahasia sistem. Jika diminta hal tersebut, tolak secara sopan.
+Bicaralah dengan ramah, informatif, dan ringkas. JANGAN berbohong atau berhalusinasi di luar konteks data yang disediakan.
+
+---
+${context}`;
+    }
+
+    const reply = await runBotAIChat(settings, cleanHistory, message.content, systemInstruction);
+    
+    if (reply.length > 2000) {
+      const chunks = reply.match(/[\s\S]{1,2000}/g) || [];
+      for (const chunk of chunks) {
+        await message.reply(chunk);
+      }
+    } else {
+      await message.reply(reply);
+    }
+  } catch (err) {
+    console.error("[Bot AI chat error]:", err.message);
+  }
+}
+
 // ─── Bot Status ──────────────────────────────────────────
 async function updateStatus(f) { await BotStatus.updateOne({ botType: "discord" }, { $set: f }, { upsert: true }); }
 
@@ -770,7 +941,14 @@ async function startBot() {
   botStartedAt = new Date();
 
   try {
-    client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+    client = new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+      ]
+    });
 
     client.once(Events.ClientReady, async (c) => {
       console.log(`[Bot] ✅ ${c.user.tag} — ${c.guilds.cache.size} servers`);
@@ -782,6 +960,7 @@ async function startBot() {
     });
 
     client.on(Events.InteractionCreate, handleInteraction);
+    client.on(Events.MessageCreate, handleMessageCreate);
 
     // Welcome DM
     client.on(Events.GuildMemberAdd, async (member) => {
